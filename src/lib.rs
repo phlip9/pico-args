@@ -14,7 +14,6 @@ If you think that this library doesn't support some feature, it's probably inten
 - `eq-separator`
 
   Allows parsing arguments separated by `=`<br/>
-  This feature adds about 1KiB to the resulting binary
 
 - `short-space-opt`
 
@@ -30,7 +29,6 @@ If you think that this library doesn't support some feature, it's probably inten
   to prevent ambiguities
 */
 
-#![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 use std::ffi::{OsString, OsStr};
@@ -134,7 +132,7 @@ impl Arguments {
     ///
     /// # Errors
     ///
-    /// - When arguments is not a UTF-8 string.
+    /// - When argument is not a UTF-8 string.
     pub fn subcommand(&mut self) -> Result<Option<String>, Error> {
         if self.0.is_empty() {
             return Ok(None);
@@ -273,6 +271,7 @@ impl Arguments {
     ) -> Result<Option<T>, Error> {
         match self.find_value(keys)? {
             Some((value, kind, idx)) => {
+                let value = os_to_str(value)?;
                 match f(value) {
                     Ok(value) => {
                         // Remove only when all checks are passed.
@@ -301,7 +300,7 @@ impl Arguments {
     fn find_value(
         &mut self,
         keys: Keys,
-    ) -> Result<Option<(&str, PairKind, usize)>, Error> {
+    ) -> Result<Option<(&OsStr, PairKind, usize)>, Error> {
         if let Some((idx, key)) = self.index_of(keys) {
             // Parse a `--key value` pair.
 
@@ -310,57 +309,10 @@ impl Arguments {
                 None => return Err(Error::OptionWithoutAValue(key)),
             };
 
-            let value = os_to_str(value)?;
             Ok(Some((value, PairKind::TwoArguments, idx)))
         } else if let Some((idx, key)) = self.index_of2(keys) {
             // Parse a `--key=value` or `-Kvalue` pair.
-
-            let value = &self.0[idx];
-
-            // Only UTF-8 strings are supported in this method.
-            let value = value.to_str().ok_or_else(|| Error::NonUtf8Argument)?;
-
-            let mut value_range = key.len()..value.len();
-
-            if value.as_bytes().get(value_range.start) == Some(&b'=') {
-                #[cfg(feature = "eq-separator")]
-                {
-                    value_range.start += 1;
-                }
-                #[cfg(not(feature = "eq-separator"))]
-                return Err(Error::OptionWithoutAValue(key));
-            } else {
-                // Key must be followed by `=` if not `short-space-opt`
-                #[cfg(not(feature = "short-space-opt"))]
-                return Err(Error::OptionWithoutAValue(key));
-            }
-
-            // Check for quoted value.
-            if let Some(c) = value.as_bytes().get(value_range.start).cloned() {
-                if c == b'"' || c == b'\'' {
-                    value_range.start += 1;
-
-                    // A closing quote must be the same as an opening one.
-                    if ends_with(&value[value_range.start..], c) {
-                        value_range.end -= 1;
-                    } else {
-                        return Err(Error::OptionWithoutAValue(key));
-                    }
-                }
-            }
-
-            // Check length, otherwise String::drain will panic.
-            if value_range.end - value_range.start == 0 {
-                return Err(Error::OptionWithoutAValue(key));
-            }
-
-            // Extract `value` from `--key="value"`.
-            let value = &value[value_range];
-
-            if value.is_empty() {
-                return Err(Error::OptionWithoutAValue(key));
-            }
-
+            let value = parse_eq_or_space_opt(key, &self.0[idx])?;
             Ok(Some((value, PairKind::SingleArgument, idx)))
         } else {
             Ok(None)
@@ -373,7 +325,7 @@ impl Arguments {
     fn find_value(
         &mut self,
         keys: Keys,
-    ) -> Result<Option<(&str, PairKind, usize)>, Error> {
+    ) -> Result<Option<(&OsStr, PairKind, usize)>, Error> {
         if let Some((idx, key)) = self.index_of(keys) {
             // Parse a `--key value` pair.
 
@@ -382,7 +334,6 @@ impl Arguments {
                 None => return Err(Error::OptionWithoutAValue(key)),
             };
 
-            let value = os_to_str(value)?;
             Ok(Some((value, PairKind::TwoArguments, idx)))
         } else {
             Ok(None)
@@ -443,8 +394,7 @@ impl Arguments {
     ///
     /// - When option is not present.
     /// - When value parsing failed.
-    /// - When key-value pair is separated not by space.
-    ///   Only [`value_from_fn`] supports `=` separator.
+    /// - When key-value pair is separated not by space or `=`.
     ///
     /// [`value_from_fn`]: struct.Arguments.html#method.value_from_fn
     pub fn value_from_os_str<A: Into<Keys>, T, E: Display>(
@@ -479,27 +429,24 @@ impl Arguments {
         keys: Keys,
         f: fn(&OsStr) -> Result<T, E>,
     ) -> Result<Option<T>, Error> {
-        if let Some((idx, key)) = self.index_of(keys) {
-            // Parse a `--key value` pair.
+        match self.find_value(keys)? {
+            Some((value, kind, idx)) => {
+                match f(value) {
+                    Ok(value) => {
+                        // Remove only when all checks are passed.
+                        self.0.remove(idx);
+                        if kind == PairKind::TwoArguments {
+                            self.0.remove(idx);
+                        }
 
-            let value = match self.0.get(idx + 1) {
-                Some(v) => v,
-                None => return Err(Error::OptionWithoutAValue(key)),
-            };
-
-            match f(value) {
-                Ok(value) => {
-                    // Remove only when all checks are passed.
-                    self.0.remove(idx);
-                    self.0.remove(idx);
-                    Ok(Some(value))
-                }
-                Err(e) => {
-                    Err(Error::ArgumentParsingFailed { cause: error_to_string(e) })
+                        Ok(Some(value))
+                    }
+                    Err(e) => {
+                        Err(Error::ArgumentParsingFailed { cause: error_to_string(e) })
+                    }
                 }
             }
-        } else {
-            Ok(None)
+            None => Ok(None),
         }
     }
 
@@ -646,7 +593,7 @@ impl Arguments {
         } else {
             let value = self.0.remove(0);
             let value = os_to_str(value.as_os_str())?;
-            match f(&value) {
+            match f(value) {
                 Ok(value) => Ok(Some(value)),
                 Err(e) => Err(Error::Utf8ArgumentParsingFailed {
                     value: value.to_string(),
@@ -687,6 +634,55 @@ impl Arguments {
     }
 }
 
+// Parse a `--key=value` or `-Kvalue` pair.
+#[cfg(any(feature = "eq-separator", feature = "short-space-opt"))]
+#[inline]
+fn parse_eq_or_space_opt<'a>(key: &'static str, mut value: &'a OsStr) -> Result<&'a OsStr, Error> {
+    value = os_str_strip_prefix(value, key).expect("missing --key prefix");
+
+    // Check for "=" separator
+    if let Some(v) = os_str_strip_prefix(value, "=") {
+        #[cfg(feature = "eq-separator")]
+        {
+            value = v;
+        }
+        #[cfg(not(feature = "eq-separator"))]
+        {
+            let _v = v;
+            return Err(Error::OptionWithoutAValue(key));
+        }
+    } else {
+        // Key must be followed by `=` if not `short-space-opt`
+        #[cfg(not(feature = "short-space-opt"))]
+        return Err(Error::OptionWithoutAValue(key));
+    }
+
+    // Check for double-quoted value.
+    if let Some(v) = os_str_strip_prefix(value, "\"") {
+        if let Some(v2) = os_str_strip_suffix(v, "\"") {
+            value = v2;
+        } else {
+            return Err(Error::OptionWithoutAValue(key));
+        }
+    }
+
+    // Check for single-quoted value.
+    if let Some(v) = os_str_strip_prefix(value, "'") {
+        if let Some(v2) = os_str_strip_suffix(v, "'") {
+            value = v2;
+        } else {
+            return Err(Error::OptionWithoutAValue(key));
+        }
+    }
+
+    // Check length, otherwise String::drain will panic.
+    if value.is_empty() {
+        return Err(Error::OptionWithoutAValue(key));
+    }
+
+    Ok(value)
+}
+
 // Display::to_string() is usually inlined, so by wrapping it in a non-inlined
 // function we are reducing the size a bit.
 #[inline(never)]
@@ -697,12 +693,8 @@ fn error_to_string<E: Display>(e: E) -> String {
 #[cfg(feature = "eq-separator")]
 #[inline(never)]
 fn starts_with_plus_eq(text: &OsStr, prefix: &str) -> bool {
-    if let Some(s) = text.to_str() {
-        if s.get(0..prefix.len()) == Some(prefix) {
-            if s.as_bytes().get(prefix.len()) == Some(&b'=') {
-                return true;
-            }
-        }
+    if let Some(text) = os_str_strip_prefix(text, prefix) {
+        return os_str_strip_prefix(text, "=").is_some();
     }
 
     false
@@ -714,13 +706,8 @@ fn starts_with_short_prefix(text: &OsStr, prefix: &str) -> bool {
     if prefix.starts_with("--") {
         return false; // Only works for short keys
     }
-    if let Some(s) = text.to_str() {
-        if s.get(0..prefix.len()) == Some(prefix) {
-            return true;
-        }
-    }
 
-    false
+    return os_str_strip_prefix(text, prefix).is_some();
 }
 
 #[cfg(all(feature = "eq-separator", feature = "short-space-opt"))]
@@ -739,19 +726,59 @@ fn index_predicate(text: &OsStr, prefix: &str) -> bool {
     starts_with_short_prefix(text, prefix)
 }
 
-#[cfg(any(feature = "eq-separator", feature = "short-space-opt"))]
-#[inline]
-fn ends_with(text: &str, c: u8) -> bool {
-    if text.is_empty() {
-        false
-    } else {
-        text.as_bytes()[text.len() - 1] == c
-    }
-}
-
 #[inline]
 fn os_to_str(text: &OsStr) -> Result<&str, Error> {
-    text.to_str().ok_or_else(|| Error::NonUtf8Argument)
+    text.to_str().ok_or(Error::NonUtf8Argument)
+}
+
+/// Returns the [`OsStr`] with the UTF-8 prefix removed.
+///
+/// Removes the prefix only once. If `text` doesn't start with `prefix`, returns
+/// `None`.
+#[cfg(any(feature = "eq-separator", feature = "short-space-opt"))]
+#[inline]
+fn os_str_strip_prefix<'a>(text: &'a OsStr, prefix: &str) -> Option<&'a OsStr> {
+    // SAFETY:
+    //
+    // > The bytes from [`OsStr::as_encoded_bytes`] can be split either
+    //   immediately before or immediately after any valid, non-empty UTF-8
+    //   substring.
+    //
+    //   From: [`OsStr::from_encoded_bytes_unchecked`]
+    //
+    // If `text` is prefixed by the UTF-8 string, `prefix`, we will slice from
+    // "immediately after a valid non-empty UTF-8 substring (`prefix`)" to
+    // "the end of the string (`text`)".
+    text.as_encoded_bytes()
+        .strip_prefix(prefix.as_bytes())
+        .map(|stripped| {
+            unsafe { OsStr::from_encoded_bytes_unchecked(stripped) }
+        })
+}
+
+/// Returns the [`OsStr`] with the UTF-8 suffix removed.
+///
+/// Removes the suffix only once. If `text` doesn't end with `suffix`, returns
+/// `None`.
+#[cfg(any(feature = "eq-separator", feature = "short-space-opt"))]
+#[inline]
+fn os_str_strip_suffix<'a>(text: &'a OsStr, suffix: &str) -> Option<&'a OsStr> {
+    // SAFETY:
+    //
+    // > The bytes from [`OsStr::as_encoded_bytes`] can be split either
+    //   immediately before or immediately after any valid non-empty UTF-8
+    //   substring.
+    //
+    //   From: [`OsStr::from_encoded_bytes_unchecked`]
+    //
+    // If `text` is suffixed by the UTF-8 string, `suffix`, we will slice from
+    // "the beginning of the string (`text`)" to "immediately before a valid
+    // non-empty UTF-8 substring (`suffix`)".
+    text.as_encoded_bytes()
+        .strip_suffix(suffix.as_bytes())
+        .map(|stripped| {
+            unsafe { OsStr::from_encoded_bytes_unchecked(stripped) }
+        })
 }
 
 
