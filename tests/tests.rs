@@ -1,10 +1,15 @@
 use std::str::FromStr;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 
 use pico_args::*;
 
 fn to_vec(args: &[&str]) -> Vec<OsString> {
     args.iter().map(|s| s.to_string().into()).collect()
+}
+
+fn parse_path(s: &OsStr) -> Result<PathBuf, &'static str> {
+    Ok(s.into())
 }
 
 #[test]
@@ -337,15 +342,137 @@ fn duplicated_options_01() {
 
 #[test]
 fn option_from_os_str_01() {
-    use std::path::PathBuf;
-
-    fn parse_path(s: &std::ffi::OsStr) -> Result<PathBuf, &'static str> {
-        Ok(s.into())
-    }
-
     let mut args = Arguments::from_vec(to_vec(&["--input", "text.txt"]));
     let value: Result<Option<PathBuf>, Error> = args.opt_value_from_os_str("--input", parse_path);
-    assert_eq!(value.unwrap().unwrap().display().to_string(), "text.txt");
+    assert_eq!(value.unwrap().unwrap(), Path::new("text.txt"));
+}
+
+#[cfg(feature = "eq-separator")]
+#[test]
+fn eq_option_from_os_str_01() {
+    let mut args = Arguments::from_vec(to_vec(&["--width2=15", "--input=/foo/bar.toml"]));
+    let value: Option<PathBuf> = args.opt_value_from_os_str("--input", parse_path).unwrap();
+    assert_eq!(&value.unwrap(), Path::new("/foo/bar.toml"));
+
+    let mut args = Arguments::from_vec(to_vec(&["--width2=15", "--input=\"/foo/bar.toml\""]));
+    let value: Option<PathBuf> = args.opt_value_from_os_str("--input", parse_path).unwrap();
+    assert_eq!(&value.unwrap(), Path::new("/foo/bar.toml"));
+
+    let mut args = Arguments::from_vec(to_vec(&["--width2=15", "--input='/foo/bar.toml'"]));
+    let value: Option<PathBuf> = args.opt_value_from_os_str("--input", parse_path).unwrap();
+    assert_eq!(&value.unwrap(), Path::new("/foo/bar.toml"));
+}
+
+// On unix platforms, `OsStr` is just a `[u8]`. Test that we can parse
+// "="-separated args with arbitrary byte values.
+#[cfg(unix)]
+#[test]
+fn eq_option_from_os_str_unix_01() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let bytes: &[u8] =
+        &b"/foo/bar\x14\x8d\xf6o(s\xf6\xf0u\xfe-r#\xddj\x9a\x11r\xa98\x99\xa7|\xca\x0c5\xce\xea\xe5O\xe3"[..];
+    assert!(!bytes.contains(&b'\0'));
+
+    for len in 0..bytes.len() {
+        if len == 0 { continue; }
+
+        let path = OsStr::from_bytes(&bytes[len..]);
+
+        let mut args = Arguments::from_vec(vec![OsString::from("--input"), path.to_owned()]);
+        let value: Option<PathBuf> = args.opt_value_from_os_str("--input", parse_path).unwrap();
+        assert_eq!(&value.unwrap(), Path::new(path));
+
+        let seps: &[&OsStr] = &[OsStr::new(""), OsStr::new("'"), OsStr::new("\"")];
+
+        #[cfg(feature = "eq-separator")]
+        for sep in seps {
+            let mut arg = OsString::from("--input=");
+            arg.push(*sep);
+            arg.push(path);
+            arg.push(*sep);
+
+            let mut args = Arguments::from_vec(vec![arg]);
+            let value: Option<PathBuf> = args.opt_value_from_os_str("--input", parse_path).unwrap();
+            assert_eq!(&value.unwrap(), Path::new(path));
+        }
+
+        #[cfg(feature = "short-space-opt")]
+        for sep in seps {
+            let mut arg = OsString::from("-i");
+            arg.push(*sep);
+            arg.push(path);
+            arg.push(*sep);
+
+            let mut args = Arguments::from_vec(vec![arg]);
+            let value: Option<PathBuf> = args.opt_value_from_os_str("-i", parse_path).unwrap();
+            assert_eq!(&value.unwrap(), Path::new(path));
+        }
+
+        #[cfg(not(any(feature = "eq-separator", feature = "short-space-opt")))]
+        let _seps = seps;
+    }
+}
+
+// Windows uses UTF-16. On windows, `OsString` uses WTF-8 to losslessly encode
+// UTF-16. Test that we can parse "="-separated args with UTF-16 values.
+#[cfg(windows)]
+#[test]
+fn eq_option_from_os_str_windows_01() {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    let s = r#"C:\\my cool\path"#;
+    let os = OsString::from_str(s).unwrap();
+    let mut utf16: Vec<u16> = os.encode_wide().collect();
+    utf16.extend(&[
+        0x052a, 0xc23e, 0x2a89, 0x8526, 0x84d1, 0x4207, 0x3265, 0xd396, 0x92f2,
+        0x6e77, 0x35e7, 0x7189, 0x37db, 0x154f, 0x0095, 0x38e4, 0x1b11, 0xf831,
+        0x00a5, 0x1a00, 0x00b2, 0x29ed, 0x08a0, 0xc9cf, 0xe1c0, 0xbf7f, 0xa3d6,
+    ]);
+    assert!(!utf16.contains(&0_u16));
+
+    for len in 0..utf16.len() {
+        if len == 0 { continue; }
+
+        let path = OsString::from_wide(&utf16[len..]);
+
+        let mut args = Arguments::from_vec(vec![OsString::from("--input"), path.to_owned()]);
+        let value: Option<PathBuf> = args.opt_value_from_os_str("--input", parse_path).unwrap();
+        assert_eq!(&value.unwrap(), Path::new(&path));
+
+        let seps: &[&OsStr] = &[
+            OsStr::new(""),
+            OsStr::new("'"),
+            OsStr::new("\""),
+        ];
+
+        #[cfg(feature = "eq-separator")]
+        for sep in seps {
+            let mut arg = OsString::from("--input=");
+            arg.push(*sep);
+            arg.push(&path);
+            arg.push(*sep);
+
+            let mut args = Arguments::from_vec(vec![arg]);
+            let value: Option<PathBuf> = args.opt_value_from_os_str("--input", parse_path).unwrap();
+            assert_eq!(&value.unwrap(), Path::new(&path));
+        }
+
+        #[cfg(feature = "short-space-opt")]
+        for sep in seps {
+            let mut arg = OsString::from("-i");
+            arg.push(*sep);
+            arg.push(&path);
+            arg.push(*sep);
+
+            let mut args = Arguments::from_vec(vec![arg]);
+            let value: Option<PathBuf> = args.opt_value_from_os_str("-i", parse_path).unwrap();
+            assert_eq!(&value.unwrap(), Path::new(&path));
+        }
+
+        #[cfg(not(any(feature = "eq-separator", feature = "short-space-opt")))]
+        let _seps = seps;
+    }
 }
 
 #[test]
