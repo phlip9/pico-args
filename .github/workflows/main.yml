@@ -2,38 +2,35 @@ name: Rust
 
 on: [push, pull_request]
 
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        rust:
-          - 1.32.0
-          - stable
     steps:
-    - name: Checkout
-      uses: actions/checkout@v2
+    - uses: actions/checkout@v4
+    - uses: taiki-e/install-action@cargo-hack
 
-    - name: Install toolchain
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: ${{ matrix.rust }}
-        override: true
+    - run: rustup update stable && rustup default stable
+    - run: cargo hack clippy --all-targets --feature-powerset
+    - run: cargo hack test --feature-powerset
+    - run: cargo hack test --feature-powerset --rust-version
 
-    - name: Test with default features
-      run: cargo test
-
-    - name: Test without default features
-      run: cargo test --no-default-features
-
-    - name: Test with short-space-opt
-      run: cargo test --no-default-features --features short-space-opt
-
-    - name: Test with combined-flags
-      run: cargo test --no-default-features --features combined-flags
-
-    - name: Test with all features
-      run: cargo test --all-features
+    - run: rustup update nightly && rustup default nightly
+    - run: rustup component add miri
+    - run: cargo +nightly miri setup
+    - run: cargo +nightly miri test --all-features
+    - run: cargo +nightly miri setup --target=x86_64-pc-windows-msvc
+    - run: cargo +nightly miri test --all-features --target=x86_64-pc-windows-msvc

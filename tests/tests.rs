@@ -565,8 +565,8 @@ fn opt_free_from_fn_05() {
 
 #[test]
 fn opt_free_from_fn_06() {
-    let mut args = Arguments::from_vec(to_vec(&["-3.14"]));
-    assert_eq!(args.opt_free_from_fn(f32::from_str).unwrap(), Some(-3.14f32));
+    let mut args = Arguments::from_vec(to_vec(&["-2.9933"]));
+    assert_eq!(args.opt_free_from_fn(f32::from_str).unwrap(), Some(-2.9933_f32));
 }
 
 #[test]
